@@ -40,6 +40,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { AccountInfo, SourceInfo } from '../shared/types';
 import { codexDirsRefused, detectAccounts, discoverClaudeDirs, type DetectedAccount } from '../server/accounts/detect';
 import { detectCodexAccounts, discoverCodexDirs } from '../server/sources/codex/accounts';
+import { discoverAntigravityDirs } from '../server/sources/antigravity/detect';
 import { describeStateMigration, LEGACY_NAME, legacyEnvWarning, migrateLegacyStateDir } from '../server/legacy';
 import { makeClaudeRunner, MIN_CLAUDE_VERSION, readPackageVersion, updateInstalledMods, type ModUpdateResult } from './mod-install';
 import { tr } from '../shared/i18n';
@@ -71,6 +72,8 @@ const CODEX_CONTAINER_ROOT = '/codex';
  * auth.json, config.toml, shell_snapshots/, history.jsonl, logs e os SQLite ficam no host.
  */
 export const CODEX_MOUNTED_SUBDIRS = ['sessions', 'archived_sessions', 'thread-writer-locks'] as const;
+const ANTIGRAVITY_CONTAINER_ROOT = '/antigravity';
+export const ANTIGRAVITY_MOUNTED_ITEMS = ['presence', 'brain', 'conversation_summaries.db'] as const;
 const DEFAULT_PORT = 4747;
 const HEALTH_TIMEOUT_MS = 120_000;
 /** Imagem e volume de dados como o Compose os nomeia (`name: habblaud` no docker-compose.yml). */
@@ -229,6 +232,17 @@ export function planCodexMounts(dirs: string[], accounts: DetectedAccount[], res
   return out;
 }
 
+export function planAntigravityMounts(dirs: string[], resolveDir: (p: string) => string | undefined = realDir): BindMount[] {
+  const binds: BindMount[] = [];
+  for (const hostDir of dirs) {
+    for (const item of ANTIGRAVITY_MOUNTED_ITEMS) {
+      const source = resolveDir(join(hostDir, item));
+      if (source) binds.push({ source, target: posix.join(ANTIGRAVITY_CONTAINER_ROOT, item) });
+    }
+  }
+  return binds;
+}
+
 /** Metadados das contas do Codex para HABBLAUD_ACCOUNTS: `provider: 'codex'` e a pasta do HOST em `configDir`. */
 export function codexAccountsPayload(mounts: AccountMount[]): AccountPayload[] {
   return mounts.map(({ account: a, hostDir, mountDir }) => {
@@ -316,12 +330,14 @@ export function renderOverride(
   codex: AccountMount[] = [],
   remoteTlsDir?: string,
   extraPorts: string[] = [],
+  antigravityBinds: BindMount[] = [],
 ): string {
   const env: Array<[string, string]> = [
     ['HABBLAUD_CLAUDE_DIRS', mounts.map((m) => m.mountDir).join(',')],
     ['HABBLAUD_ACCOUNTS', JSON.stringify([...accountsPayload(mounts), ...codexAccountsPayload(codex)])],
   ];
   if (codex.length) env.push(['HABBLAUD_CODEX_DIRS', codex.map((m) => m.mountDir).join(',')]);
+  if (antigravityBinds.length) env.push(['HABBLAUD_ANTIGRAVITY_DIR', ANTIGRAVITY_CONTAINER_ROOT]);
   if (usageDir) env.push(['HABBLAUD_USAGE_DIR', CONTAINER_USAGE_DIR]);
   if (timeZone) env.push(['TZ', timeZone]);
   const lines = [
@@ -329,6 +345,7 @@ export function renderOverride(
     '# Contém caminhos do host e e-mails das contas: fica fora do git e com permissão 600.',
     '# Montagens: SOMENTE <conta>/projects, <conta>/sessions e a pasta do uso do statusline, todas somente leitura.',
     ...(codex.length ? ['# Codex: SOMENTE <pasta>/sessions, <pasta>/archived_sessions e <pasta>/thread-writer-locks, somente leitura.'] : []),
+    ...(antigravityBinds.length ? ['# Google Antigravity: presence, brain e conversation_summaries.db, somente leitura.'] : []),
     'services:',
     `  ${SERVICE}:`,
     '    environment:',
@@ -337,6 +354,7 @@ export function renderOverride(
   // O Compose junta estas portas às do docker-compose.yml.
   if (extraPorts.length) lines.push('    ports:', ...extraPorts.map((p) => `      - ${yamlString(p)}`));
   const binds = [...mounts, ...codex].flatMap((m) => m.binds);
+  if (antigravityBinds.length) binds.push(...antigravityBinds);
   if (usageDir) binds.push({ source: usageDir, target: CONTAINER_USAGE_DIR });
   // Acesso remoto: SÓ a pasta do certificado do servidor (a chave da CA fica no host).
   if (remoteTlsDir) binds.push({ source: remoteTlsDir, target: CONTAINER_REMOTE_TLS_DIR });
@@ -707,13 +725,19 @@ async function up(opts: Options, port: number): Promise<void> {
     }
   }
 
+  const antigravityDirs = discoverAntigravityDirs(process.env, HOME);
+  const antigravityMounts = planAntigravityMounts(antigravityDirs);
+  if (antigravityMounts.length) {
+    say(tr('Google Antigravity: monta {0} em {1}, somente leitura.', [tildify(antigravityDirs[0]), ANTIGRAVITY_CONTAINER_ROOT]));
+  }
+
   migrateStateDir();
   const usageDir = ensureUsageDir();
   if (usageDir) say(tr('Uso ao vivo (mod ou tap de statusline): monta {0} em {1}, somente leitura.', [tildify(USAGE_DIR), CONTAINER_USAGE_DIR]));
   const remoteTlsDir = prepareRemoteTls();
   const remotePorts = remoteTlsDir || remoteInsecure() ? remotePortsToPublish() : [];
   const tmp = `${OVERRIDE_FILE}.tmp`;
-  writeFileSync(tmp, renderOverride(mounts, new Date(), usageDir, hostTimeZone(), codexMounts, remoteTlsDir, remotePorts), { mode: 0o600 });
+  writeFileSync(tmp, renderOverride(mounts, new Date(), usageDir, hostTimeZone(), codexMounts, remoteTlsDir, remotePorts, antigravityMounts), { mode: 0o600 });
   chmodSync(tmp, 0o600);
   renameSync(tmp, OVERRIDE_FILE);
   say(tr('docker-compose.override.yml gerado.'));
@@ -740,6 +764,11 @@ async function up(opts: Options, port: number): Promise<void> {
     const usage = health.accounts?.find((a) => a.id === m.account.id)?.usageStatus;
     const state = src.ok ? plural(src.sessions, tr('sessão aberta'), tr('sessões abertas')) : tr('erro ao ler ({0})', [src.error ?? tr('desconhecido')]);
     say(`  Codex ${m.account.short} (${m.account.id}): ${state}${usage ? ` · ${USAGE_STATUS[usage]}` : ''}`);
+  }
+  const agySrc = health.sources?.find((s) => s.provider === 'antigravity');
+  if (agySrc) {
+    const state = agySrc.ok ? plural(agySrc.sessions, tr('sessão aberta'), tr('sessões abertas')) : tr('erro ao ler ({0})', [agySrc.error ?? tr('desconhecido')]);
+    say(`  Google Antigravity (${agySrc.label}): ${state}`);
   }
   for (const line of modHint(updateMods(dirs, accounts))) say(line);
   // Com a cópia falha, os dados só existem no volume antigo: nada de sugerir apagá-lo.
