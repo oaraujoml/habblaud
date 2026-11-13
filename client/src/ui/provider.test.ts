@@ -21,6 +21,18 @@ describe('ferramenta (Claude Code ou Codex)', () => {
     expect(isCodex({ provider: 'codex' })).toBe(true);
     expect(isCodex({ provider: 'claude' })).toBe(false);
     expect(isCodex(null)).toBe(false);
+    expect(providerOf({ provider: 'antigravity' })).toBe('antigravity');
+  });
+
+  it('suporte a Antigravity (provider, id, short e tags)', () => {
+    expect(accountProvider(undefined, '.antigravity')).toBe('antigravity');
+    expect(accountProvider(undefined, 'C:/Users/ss1096844/.gemini/antigravity')).toBe('antigravity');
+    expect(fallbackShort('.antigravity')).toBe('G');
+    expect(showsProviderTag('antigravity', 'Antigravity')).toBe(false);
+    expect(showsProviderTag('antigravity', 'Conta A')).toBe(true);
+    expect(accountChipLabel({ name: 'Conta A', provider: 'antigravity' }, '.antigravity', 'antigravity')).toBe('Conta A · Antigravity');
+    const a = { short: 'G', provider: 'antigravity' as const };
+    expect(emptyOfficeHint([a])).toBe('Abra o Claude Code, Codex ou Antigravity em qualquer projeto e veja seu agente chegar.');
   });
 
   it('id com cara de pasta do Codex (só quando a conta já não está no snapshot)', () => {
