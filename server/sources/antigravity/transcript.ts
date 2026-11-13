@@ -61,12 +61,53 @@ export function describeAntigravityTool(rawName: string, input: Rec): { desc: Ac
       };
     }
     case 'invoke_subagent': {
-      const role = str(input.Role);
-      const prompt = str(input.Prompt);
-      const type = str(input.TypeName);
+      let role = str(input.Role);
+      let prompt = str(input.Prompt);
+      let type = str(input.TypeName);
+      if (!role && input.Subagents) {
+        try {
+          const raw = typeof input.Subagents === 'string' ? JSON.parse(input.Subagents) : input.Subagents;
+          if (Array.isArray(raw) && raw.length > 0) {
+            const roles = raw.map((s: Rec) => str(s.Role) || str(s.TypeName)).filter(Boolean);
+            role = roles.join(', ');
+            prompt = str(raw[0].Prompt);
+            type = str(raw[0].TypeName);
+          }
+        } catch {
+          // ignore
+        }
+      }
+      const summary = str(input.toolSummary) || str(input.toolAction);
+      const descText = role ? truncate(role, 40) : summary ? summary.replace(/^"|"$/g, '') : undefined;
       return {
-        desc: describeTool('Agent', { description: role ? truncate(role, 40) : undefined, subagent_type: type, prompt }),
+        desc: describeTool('Agent', { description: descText, subagent_type: type, prompt }),
         tool: 'invoke_subagent',
+      };
+    }
+    case 'define_subagent': {
+      const name = str(input.Name);
+      return {
+        desc: {
+          kind: 'delegate',
+          icon: '👥',
+          text: tr('Definindo subagente: {0}', [name ?? 'agente']),
+          detail: str(input.Description),
+        },
+        tool: 'define_subagent',
+      };
+    }
+    case 'swarm': {
+      const act = str(input.action) ?? 'swarm';
+      const name = str(input.name);
+      const brief = str(input.brief);
+      return {
+        desc: {
+          kind: 'delegate',
+          icon: '🐝',
+          text: tr('Swarm: {0}', [name ?? act]),
+          detail: brief ? truncate(brief, 60) : undefined,
+        },
+        tool: 'swarm',
       };
     }
     case 'send_message': {
@@ -98,6 +139,7 @@ export interface AntigravityLineResult {
   statusHint?: AgentStatus;
   waitingFor?: string;
   tokens?: { in?: number; out?: number };
+  createdSubagents?: string[];
 }
 
 export function parseAntigravityLine(rawLine: string): AntigravityLineResult | undefined {
@@ -191,6 +233,22 @@ export function parseAntigravityLine(rawLine: string): AntigravityLineResult | u
     }
   }
 
+  // Detect subagents created in model or system messages
+  const rawContent = str(j.content);
+  let createdSubagents: string[] | undefined;
+  if (rawContent && rawContent.includes('Created the following subagents:')) {
+    const ids: string[] = [];
+    const matches = rawContent.matchAll(/"conversationId":\s*"([0-9a-fA-F-]+)"/g);
+    for (const m of matches) {
+      if (m[1] && !ids.includes(m[1])) {
+        ids.push(m[1]);
+      }
+    }
+    if (ids.length > 0) {
+      createdSubagents = ids;
+    }
+  }
+
   const inTok = num(j.input_tokens);
   const outTok = num(j.output_tokens);
   const tokens = inTok !== undefined || outTok !== undefined ? { in: inTok, out: outTok } : undefined;
@@ -205,5 +263,6 @@ export function parseAntigravityLine(rawLine: string): AntigravityLineResult | u
     statusHint,
     waitingFor,
     tokens,
+    createdSubagents,
   };
 }

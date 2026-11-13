@@ -83,4 +83,45 @@ describe('antigravity transcript', () => {
     expect(parsed?.statusHint).toBe('waiting');
     expect(parsed?.waitingFor).toBe('responder uma pergunta');
   });
+
+  it('parseAntigravityLine processa invoke_subagent com Subagents em lote e extrai subagentes criados', () => {
+    const rawCall = JSON.stringify({
+      step_index: 3,
+      source: 'MODEL',
+      type: 'PLANNER_RESPONSE',
+      status: 'DONE',
+      created_at: '2026-11-13T12:00:03Z',
+      tool_calls: [
+        {
+          name: 'invoke_subagent',
+          args: {
+            Subagents: JSON.stringify([
+              { Role: 'Explorer 1', TypeName: 'researcher', Prompt: 'Pesquisar logs' },
+              { Role: 'Explorer 2', TypeName: 'tester', Prompt: 'Executar testes' },
+            ]),
+          },
+        },
+      ],
+    });
+    const parsedCall = parseAntigravityLine(rawCall);
+    expect(parsedCall?.activities[0]).toMatchObject({
+      kind: 'delegate',
+      text: 'Delegando: Explorer 1, Explorer 2',
+    });
+
+    const rawResponse = JSON.stringify({
+      step_index: 4,
+      source: 'MODEL',
+      type: 'GENERIC',
+      status: 'DONE',
+      created_at: '2026-11-13T12:00:04Z',
+      content:
+        'Created the following subagents:\n{\n  "conversationId": "11111111-2222-3333-4444-555555555555"\n}\n{\n  "conversationId": "66666666-7777-8888-9999-000000000000"\n}',
+    });
+    const parsedResp = parseAntigravityLine(rawResponse);
+    expect(parsedResp?.createdSubagents).toEqual([
+      '11111111-2222-3333-4444-555555555555',
+      '66666666-7777-8888-9999-000000000000',
+    ]);
+  });
 });
